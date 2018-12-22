@@ -25,12 +25,16 @@
 #include <ESP8266httpUpdate.h>
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
+#include <WS2812FX.h>
 
+#include "credentials.h"
 #include "config.h"
+#include "ledstate.h"
 
 char *user[] = {"mj", "rudi", "alissa", "sasa", "loic", "laurent", "greg", "cop", "pliski"};
 
 #define DEBUG
+#define LED_COUNT 1
 
 long timer_serial = 0;
 
@@ -68,12 +72,14 @@ void wifi_setup()
     if (!wifiManager.autoConnect(WIFI_AP_NAME))
     {
         Serial.print("Wifi failed to connect and hit timeout.");
+        led(LED_STATE_WIFI_ERROR);
         // Reboot. A.k.a. "Have you tried turning it Off and On again?"
         ESP.reset();
         delay(1000);
     }
     if (!MDNS.begin(HOSTNAME))
     {
+        led(LED_STATE_MQTT_ERROR);
         Serial.println("Error setting up MDNS responder!");
     }
     Serial.print("WiFi connected. IP address:\t");
@@ -87,43 +93,50 @@ void wifi_setup()
 /**********************  Potentiometer  ************************************/
 
 #define Potentiometer A0
-int threhold = 50; // you might need to adjust this value to define light on/off status
-long lastPotoRead = 0;
-long limitPotoRead = 500;
+long lastPotoTime = 0;
+int lastPotoRead = 0;
+char *currentUser = user[0];
+long limitPotoTime = 500;
 long potoDivider = 128;
 
 void potoLoop()
 {
     long now = millis();
-    if (now - lastPotoRead > limitPotoRead)
+    if (now - lastPotoTime > limitPotoTime)
     {
-        lastPotoRead = now;
+        lastPotoTime = now;
         int val = analogRead(Potentiometer) / potoDivider;
+
         String msg = "The resistance value is: ";
         msg = msg + val;
-        if (val > threhold)
-            msg = "0: " + msg; //when the resistance value>50
-        else
-            msg = "1: " + msg; //when the resistance value<50
-        char message[58];
+        msg = msg + ". lastPotoRead: " + lastPotoRead;
+        char message[158];
         msg.toCharArray(message, 58);
         Serial.println(message);
 
-        Serial.println(user[val]);
+        if (val != lastPotoRead)
+        {
+            Serial.println("val != lastPotoRead");
+            lastPotoRead = val;
+            currentUser = user[val];
+
+            led(LED_STATE_USER_CHANGED);
+
+            Serial.println(currentUser);
+        }
     }
 }
 /* ---------------------------- Potentiometer End ----------------------*/
 
 /**********************  LED AND BUTTON  ************************************/
 
-const int ledPin = 5;
-const int buttonPin = 16;
-
 // Variables will change:
-int ledState = LOW;        // the current state of the output pin
+WS2812FX ws2812fx = WS2812FX(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
+// int ledState = LOW;        // the current state of the output pin
 int buttonState;           // the current reading from the input pin
 int lastButtonState = LOW; // the previous reading from the input pin
-int lastLedState = LOW;
+// int lastLedState = LOW;
+unsigned long ledInterval = 0;
 
 // the following variables are unsigned longs because the time, measured in
 // milliseconds, will quickly become a bigger number than can be stored in an int.
@@ -134,17 +147,88 @@ unsigned long decayLimit = 2000;
 
 void setupLedAndButton()
 {
-    pinMode(buttonPin, INPUT);
-    pinMode(ledPin, OUTPUT);
+    Serial.println("setupLedAndButton");
+    ledInit();
+    pinMode(BUTTON_PIN, INPUT);
+    // pinMode(LED_PIN, OUTPUT);
 
     // set initial LED state
-    digitalWrite(ledPin, ledState);
+    // digitalWrite(LED_PIN, ledState);
+    Serial.println("setupLedAndButton end");
+}
+
+void ledUnSet()
+{
+    Serial.println("ledUnSet");
+    ws2812fx.stop();
+}
+
+void led(int state)
+{
+    switch (state)
+    {
+    case LED_STATE_INIT:
+        ledSet(FX_MODE_BLINK, CYAN, 255, 100, 200);
+        break;
+    case LED_STATE_WIFI_ERROR:
+        ledSet(FX_MODE_FADE, RED, 190, 500, 2000);
+        break;
+    case LED_STATE_MQTT_ERROR:
+        ledSet(FX_MODE_FADE, RED, 190, 2500, 1000);
+        break;
+    case LED_STATE_USER_CHANGED:
+        ledSet(FX_MODE_STATIC, PURPLE, 120, 500, 100);
+        break;
+    case LED_STATE_BUTTON_PRESSED:
+        ledSet(FX_MODE_COLOR_WIPE, YELLOW, 255, 500, 100);
+        break;
+    case LED_STATE_KISS_RX:
+        ledSet(FX_MODE_RAINBOW_CYCLE, WHITE, BRIGHTNESS_MAX, 1000, 10000);
+        break;
+    default:
+        ledUnSet();
+        break;
+    }
+}
+
+void ledSet(int mode, uint32_t color, uint8_t brightness, uint16_t speed, int interval)
+{
+    Serial.print("ledSet: ");
+    Serial.println(mode);
+    // Select an animation effect/mode. 0=static color, 1=blink, etc. You
+    // can specify a number here, or there some handy keywords defined in
+    // the WS2812FX.h file that are more descriptive and easier to remember.
+    // ws2812fx.setMode(FX_MODE_BLINK);
+    ws2812fx.setMode(mode);
+    ws2812fx.setColor(color);           // Set the color of the LEDs
+    ws2812fx.setBrightness(brightness); // Set the LED’s overall brightness. 0=strip off, 255=strip at full intensity
+    ws2812fx.setSpeed(speed);           // Set the animation speed. 10=very fast, 5000=very slow
+    ws2812fx.start();
+    decayTime = millis();
+    decayLimit = decayTime + interval;
+}
+
+void ledInit()
+{
+    Serial.println("ledInit");
+    ws2812fx.init(); // Initialize the strip
+
+    // Set the LED’s overall brightness. 0=strip off, 255=strip at full intensity
+    ws2812fx.setBrightness(120);
+
+    // Set the animation speed. 10=very fast, 5000=very slow
+    ws2812fx.setSpeed(2000);
+
+    ws2812fx.setColor(RED); // Set the color of the LEDs
+    led(LED_STATE_INIT);
+    // ws2812fx.start(); // Start the animation
+    Serial.println("ledInit end");
 }
 
 void loopLedAndButton()
 {
     // read the state of the switch into a local variable:
-    int reading = digitalRead(buttonPin);
+    int reading = digitalRead(BUTTON_PIN);
 
     // check to see if you just pressed the button
     // (i.e. the input went from LOW to HIGH), and you've waited long enough
@@ -168,30 +252,28 @@ void loopLedAndButton()
             if (buttonState == HIGH)
             {
                 mqttSend();
+                led(LED_STATE_BUTTON_PRESSED);
             }
         }
 
-        // if the led state has changed:
-        if (ledState != lastLedState)
-        {
-            lastLedState = ledState;
-            Serial.print("ledState changed: ");
-            Serial.println(ledState);
-            if (ledState == HIGH)
-            {
-                decayTime = millis();
-            }
-        }
+        // // if the led state has changed:
+        // if (ledState != lastLedState)
+        // {
+        //     lastLedState = ledState;
+        //     Serial.print("ledState changed: ");
+        //     Serial.println(ledState);
+        //     if (ledState == HIGH)
+        //     {
+        //         decayTime = millis();
+        //     }
+        // }
     }
 
-    if (decayTime > 0 && millis() - decayTime > decayLimit)
+    if (decayTime > 0 && millis() > decayLimit)
     {
         decayTime = 0;
-        ledState = LOW;
+        ledUnSet();
     }
-
-    // set the LED:
-    digitalWrite(ledPin, ledState);
 
     // save the reading. Next time through the loop, it'll be the lastButtonState:
     lastButtonState = reading;
@@ -219,13 +301,12 @@ void callback(char *topic, byte *payload, unsigned int length)
         if (ESPID[i] != (char)payload[i])
         {
             Serial.println("payload not equal client name");
-            ledState = LOW;
             return;
         }
     }
     Serial.println();
-    Serial.println("callback led high");
-    ledState = HIGH;
+    Serial.println("LED_STATE_KISS_RX");
+    led(LED_STATE_KISS_RX);
 }
 
 void reconnect()
@@ -302,14 +383,12 @@ void setup()
 void loop()
 {
     unsigned long now = millis();
-
+    ws2812fx.service();
     server.handleClient();
-
     client.loop();
 
     if (millis() > timer_serial)
     {
-
         if (!client.connected())
         {
             reconnect();
